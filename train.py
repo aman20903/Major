@@ -35,7 +35,7 @@ def load_codeforces_data(folder_path):
 
     return encoded_data, char_to_idx, idx_to_char
 
-encoded_data, char_to_idx, idx_to_char = load_codeforces_data("C:\\Users\\kulam\\OneDrive\\Documents\\Codeforces_Dataset\\New_Db")
+encoded_data, char_to_idx, idx_to_char = load_codeforces_data("C:\\Projects\\Major_ML\\New_Db")
 vocab_size = len(char_to_idx)
 
 # RNN model
