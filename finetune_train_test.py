@@ -252,24 +252,38 @@ def main():
         
         fine_tune_data, _, _ = load_and_preprocess_data(fine_tune_folder)
         
-        if fine_tune_data is None:
-            print("No data found in fine-tune folder. Skipping fine-tuning.")
-            return
+        # After loading fine-tuning data in main()
+# Check if there is any data in the fine-tune folder
+    if fine_tune_data:
+        if 'c_family' in fine_tune_data and fine_tune_data['c_family']:
+            fine_tune_sequences = create_sequences(fine_tune_data['c_family'], sequence_length)
+            print("\nStarting fine-tuning with C-family programs data...")
         
-        fine_tune_sequences = []
-        for lang_data in fine_tune_data.values():
-            fine_tune_sequences.extend(create_sequences(lang_data, sequence_length))
-        
+        else:
+            fallback_language = next(iter(fine_tune_data))  # Take any available language if 'c_family' is missing
+            fine_tune_sequences = create_sequences(fine_tune_data[fallback_language], sequence_length)
+            print(f"\nStarting fine-tuning with {fallback_language} data (no C-family data found)...")
+
+    # Proceed with fine-tuning as before
         fine_tune_train_sequences, fine_tune_test_sequences = train_test_split(
             fine_tune_sequences, test_size=test_size, random_state=42
         )
+
+        train_dataloader = create_dataloader(fine_tune_train_sequences, batch_size)
+        test_dataloader = create_dataloader(fine_tune_test_sequences, batch_size, shuffle=False)
+
+    # Fine-tune with lower learning rate
+        optimizer = optim.Adam(model.parameters(), lr=fine_tune_lr)
         
-        fine_tune_train_dataloader = create_dataloader(fine_tune_train_sequences, batch_size)
-        fine_tune_test_dataloader = create_dataloader(fine_tune_test_sequences, batch_size, shuffle=False)
-        
-        train_model(model, fine_tune_train_dataloader, fine_tune_test_dataloader, criterion, optimizer,
-                    device, fine_tune_epochs, sequence_length, vocab_size, fine_tuned_model_path,
-                    fine_tuning=True)
+        train_model(
+            model, train_dataloader, test_dataloader, criterion, optimizer, 
+            device, fine_tune_epochs, sequence_length, vocab_size, 
+            fine_tuned_model_path, fine_tuning=True
+        )
+
+    else:
+        print("No data found in fine-tune folder. Skipping fine-tuning.")
+
 
 if __name__ == "__main__":
     main()
