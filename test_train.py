@@ -1,29 +1,52 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from sklearn.model_selection import train_test_split
 import numpy as np
 import os
 
-# RNN model definition
-class CharRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers):
-        super(CharRNN, self).__init__()
+class ImprovedCharRNN(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, num_layers, dropout=0.5):
+        super(ImprovedCharRNN, self).__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        self.embedding = nn.Embedding(input_size, hidden_size)
-        self.lstm = nn.LSTM(hidden_size, hidden_size, num_layers, batch_first=True)
-        self.fc = nn.Linear(hidden_size, output_size)
+        
+        self.embedding = nn.Embedding(input_size, hidden_size * 2)
+        self.lstm = nn.LSTM(
+            hidden_size * 2, 
+            hidden_size, 
+            num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=True
+        )
+        
+        self.layer_norm = nn.LayerNorm(hidden_size * 2)
+        self.dropout = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size * 2, output_size)
 
     def forward(self, x, hidden):
-        x = self.embedding(x)
-        out, hidden = self.lstm(x, hidden)
-        out = self.fc(out.reshape(-1, self.hidden_size))
-        return out, hidden
+        batch_size = x.size(0)
+        seq_length = x.size(1)
+        
+        x = self.embedding(x)  # [batch_size, seq_length, hidden_size * 2]
+        x = self.layer_norm(x)
+        
+        lstm_out, hidden = self.lstm(x, hidden)
+        
+        # Reshape LSTM output to combine forward and backward directions
+        lstm_out = lstm_out.contiguous().view(batch_size * seq_length, self.hidden_size * 2)
+        lstm_out = self.dropout(lstm_out)
+        
+        # Apply final linear transformation
+        output = self.fc(lstm_out)  # [batch_size * seq_length, output_size]
+        
+        return output, hidden
 
     def init_hidden(self, batch_size, device):
-        return (torch.zeros(self.num_layers, batch_size, self.hidden_size).to(device),
-                torch.zeros(self.num_layers, batch_size, self.hidden_size).to(device))
+        return (torch.zeros(self.num_layers * 2, batch_size, self.hidden_size).to(device),
+                torch.zeros(self.num_layers * 2, batch_size, self.hidden_size).to(device))
 
 def load_codeforces_data(folder_path):
     code_data = ""
@@ -33,10 +56,13 @@ def load_codeforces_data(folder_path):
         for file in files:
             if file.endswith(('.java', '.py', '.cpp')):
                 file_path = os.path.join(root, file)
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    code = f.read()
-                    code_data += code
-                    chars.update(code)
+                try:
+                    with open(file_path, 'r', encoding='utf-8') as f:
+                        code = f.read()
+                        code_data += code
+                        chars.update(code)
+                except UnicodeDecodeError:
+                    continue
 
     chars = sorted(list(chars))
     char_to_idx = {char: idx for idx, char in enumerate(chars)}
@@ -47,7 +73,8 @@ def load_codeforces_data(folder_path):
 
 def create_sequences(encoded_data, sequence_length):
     sequences = []
-    for i in range(0, len(encoded_data) - sequence_length, sequence_length):
+    stride = sequence_length // 2
+    for i in range(0, len(encoded_data) - sequence_length, stride):
         seq = encoded_data[i:i + sequence_length]
         sequences.append(seq)
     return sequences
@@ -68,12 +95,12 @@ def evaluate_model(model, dataloader, criterion, device, sequence_length):
             hidden = model.init_hidden(batch_size, device)
             
             batch = batch.to(device)
-            inputs, targets = batch[:, :-1], batch[:, 1:].reshape(-1)
+            inputs = batch[:, :-1]
+            targets = batch[:, 1:].reshape(-1)
             
             outputs, _ = model(inputs, hidden)
-            outputs = outputs.view(batch_size * (sequence_length - 1), -1)
-            
             loss = criterion(outputs, targets)
+            
             total_loss += loss.item()
             
             _, predicted = torch.max(outputs, dim=1)
@@ -87,38 +114,42 @@ def evaluate_model(model, dataloader, criterion, device, sequence_length):
 def main():
     # Hyperparameters
     input_size = 128
-    hidden_size = 512
-    num_layers = 2
+    hidden_size = 512  # Reduced to prevent memory issues
+    num_layers = 2     # Reduced to prevent memory issues
     num_epochs = 5
     learning_rate = 0.001
-    sequence_length = 100
-    batch_size = 64
+    sequence_length = 100  # Reduced to prevent memory issues
+    batch_size = 32
     test_size = 0.2
-
-    # Load data
+    
+    # Load and prepare data
     encoded_data, char_to_idx, idx_to_char = load_codeforces_data("C:\\Projects\\Major_ML\\New_Db")
     vocab_size = len(char_to_idx)
     
-    # Create sequences
     sequences = create_sequences(encoded_data, sequence_length)
-    
-    # Split into train and test sets
     train_sequences, test_sequences = train_test_split(sequences, test_size=test_size, random_state=42)
     
-    # Create dataloaders
     train_dataloader = create_dataloader(train_sequences, batch_size)
     test_dataloader = create_dataloader(test_sequences, batch_size, shuffle=False)
     
-    # Initialize model, criterion, and optimizer
+    # Initialize model and training components
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = CharRNN(vocab_size, hidden_size, vocab_size, num_layers).to(device)
+    print(f"Using device: {device}")
+    
+    model = ImprovedCharRNN(vocab_size, hidden_size, vocab_size, num_layers).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     
     # Training loop
     best_test_accuracy = 0
+    patience = 5
+    patience_counter = 0
+    max_grad_norm = 1.0
+    
     for epoch in range(num_epochs):
         model.train()
+        total_loss = 0
         total_correct = 0
         total_predictions = 0
         
@@ -127,33 +158,45 @@ def main():
             hidden = model.init_hidden(batch_size, device)
             
             batch = batch.to(device)
-            inputs, targets = batch[:, :-1], batch[:, 1:].reshape(-1)
+            inputs = batch[:, :-1]
+            targets = batch[:, 1:].reshape(-1)
             
+            # Forward pass
             hidden = tuple([h.detach() for h in hidden])
             outputs, hidden = model(inputs, hidden)
-            outputs = outputs.view(batch_size * (sequence_length - 1), vocab_size)
             
+            # Calculate loss and accuracy
             loss = criterion(outputs, targets)
+            total_loss += loss.item()
+            
+            # Backward pass
             optimizer.zero_grad()
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
             optimizer.step()
             
+            # Calculate accuracy
             _, predicted = torch.max(outputs, dim=1)
             total_correct += (predicted == targets).sum().item()
             total_predictions += targets.size(0)
             
             if i % 100 == 0:
-                train_accuracy = total_correct / total_predictions * 100
+                avg_loss = total_loss / (i + 1)
+                accuracy = (total_correct / total_predictions) * 100
                 print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_dataloader)}], "
-                      f"Loss: {loss.item():.4f}, Train Accuracy: {train_accuracy:.2f}%")
+                      f"Loss: {avg_loss:.4f}, Train Accuracy: {accuracy:.2f}%")
         
         # Evaluate on test set
         test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device, sequence_length)
         print(f"Epoch [{epoch+1}/{num_epochs}] Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%")
         
-        # Save best model
+        # Learning rate scheduling
+        scheduler.step(test_accuracy)
+        
+        # Save best model and check early stopping
         if test_accuracy > best_test_accuracy:
             best_test_accuracy = test_accuracy
+            patience_counter = 0
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -163,6 +206,11 @@ def main():
                 'idx_to_char': idx_to_char
             }, "C:\\Projects\\Major_ML\\Saved_Path\\best_char_rnn_model.pth")
             print(f"Saved new best model with test accuracy: {test_accuracy:.2f}%")
+        else:
+            patience_counter += 1
+            if patience_counter >= patience:
+                print(f"Early stopping triggered after {epoch + 1} epochs")
+                break
 
 if __name__ == "__main__":
     main()
