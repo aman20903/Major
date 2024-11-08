@@ -7,46 +7,61 @@ import numpy as np
 import os
 
 class ImprovedCharRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, num_layers, dropout=0.5):
-        super(ImprovedCharRNN, self).__init__()
+    def __init__(self, input_size, hidden_size, output_size, num_layers, dropout=0.3, weight_decay=1e-4):
+        super().__init__()
         self.hidden_size = hidden_size
         self.num_layers = num_layers
-        
-        self.embedding = nn.Embedding(input_size, hidden_size * 2)
+        self.bidirectional = True
+
+        self.embedding = nn.Embedding(input_size, hidden_size)
         self.lstm = nn.LSTM(
-            hidden_size * 2, 
+            hidden_size, 
             hidden_size, 
             num_layers,
             batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
-            bidirectional=True
+            bidirectional=self.bidirectional
         )
         
-        self.layer_norm = nn.LayerNorm(hidden_size * 2)
-        self.dropout = nn.Dropout(dropout)
-        self.fc = nn.Linear(hidden_size * 2, output_size)
+        # LayerNorm for hidden size, adjusted to the correct dimension
+        self.layer_norm = nn.LayerNorm(hidden_size * (2 if self.bidirectional else 1))
+        self.dropout_layer = nn.Dropout(dropout)
+        self.fc = nn.Linear(hidden_size * (2 if self.bidirectional else 1), output_size)
+
+        # Add L2 regularization (weight decay) to the fully connected layer
+        self.fc.weight.data.normal_(0.0, 1.0 / np.sqrt(self.fc.in_features))
+        self.fc.bias.data.zero_()
+        self.weight_decay = weight_decay
 
     def forward(self, x, hidden):
         batch_size = x.size(0)
         seq_length = x.size(1)
+
+        x = self.embedding(x)
         
-        x = self.embedding(x)  # [batch_size, seq_length, hidden_size * 2]
-        x = self.layer_norm(x)
-        
+        # LSTM output: batch_size x seq_length x hidden_size * num_directions
         lstm_out, hidden = self.lstm(x, hidden)
         
-        # Reshape LSTM output to combine forward and backward directions
-        lstm_out = lstm_out.contiguous().view(batch_size * seq_length, self.hidden_size * 2)
-        lstm_out = self.dropout(lstm_out)
+        # If bidirectional, concatenate the forward and backward states
+        if self.bidirectional:
+            lstm_out = lstm_out.contiguous().view(batch_size, seq_length, 2, self.hidden_size)
+            lstm_out = lstm_out.permute(0, 2, 1, 3).contiguous()
+            lstm_out = lstm_out.view(batch_size * seq_length, self.hidden_size * 2)
+        else:
+            lstm_out = lstm_out.contiguous().view(batch_size * seq_length, self.hidden_size)
         
-        # Apply final linear transformation
-        output = self.fc(lstm_out)  # [batch_size * seq_length, output_size]
+        # Apply LayerNorm after reshaping the LSTM output
+        lstm_out = self.layer_norm(lstm_out)
+        lstm_out = self.dropout_layer(lstm_out)
+        
+        output = self.fc(lstm_out)
         
         return output, hidden
 
     def init_hidden(self, batch_size, device):
-        return (torch.zeros(self.num_layers * 2, batch_size, self.hidden_size).to(device),
-                torch.zeros(self.num_layers * 2, batch_size, self.hidden_size).to(device))
+        num_directions = 2 if self.bidirectional else 1
+        return (torch.zeros(self.num_layers * num_directions, batch_size, self.hidden_size).to(device),
+                torch.zeros(self.num_layers * num_directions, batch_size, self.hidden_size).to(device))
 
 def load_codeforces_data(folder_path):
     code_data = ""
@@ -114,35 +129,38 @@ def evaluate_model(model, dataloader, criterion, device, sequence_length):
 def main():
     # Hyperparameters
     input_size = 128
-    hidden_size = 512  # Reduced to prevent memory issues
-    num_layers = 2     # Reduced to prevent memory issues
-    num_epochs = 5
-    learning_rate = 0.001
-    sequence_length = 100  # Reduced to prevent memory issues
+    hidden_size = 512  # Increased hidden size
+    num_layers = 3  # Increased number of layers
+    num_epochs = 10  # Increased number of epochs
+    learning_rate = 0.0005  # Reduced learning rate for finer adjustments
+    sequence_length = 100
     batch_size = 32
     test_size = 0.2
-    
+    dropout = 0.4  # Increased dropout to prevent overfitting
+    weight_decay = 1e-5  # Reduced weight decay
+
     # Load and prepare data
     encoded_data, char_to_idx, idx_to_char = load_codeforces_data("C:\\Projects\\Major_ML\\New_Db")
     vocab_size = len(char_to_idx)
     
     sequences = create_sequences(encoded_data, sequence_length)
-    train_sequences, test_sequences = train_test_split(sequences, test_size=test_size, random_state=42)
+    train_sequences, val_sequences, test_sequences, _ = train_test_split(sequences, sequences, test_size=test_size, random_state=42)
     
     train_dataloader = create_dataloader(train_sequences, batch_size)
+    val_dataloader = create_dataloader(val_sequences, batch_size, shuffle=False)
     test_dataloader = create_dataloader(test_sequences, batch_size, shuffle=False)
     
     # Initialize model and training components
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    model = ImprovedCharRNN(vocab_size, hidden_size, vocab_size, num_layers).to(device)
+    model = ImprovedCharRNN(vocab_size, hidden_size, vocab_size, num_layers, dropout=dropout, weight_decay=weight_decay).to(device)
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=0.01)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
     
     # Training loop
-    best_test_accuracy = 0
+    best_val_accuracy = 0
     patience = 5
     patience_counter = 0
     max_grad_norm = 1.0
@@ -186,31 +204,35 @@ def main():
                 print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_dataloader)}], "
                       f"Loss: {avg_loss:.4f}, Train Accuracy: {accuracy:.2f}%")
         
-        # Evaluate on test set
-        test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device, sequence_length)
-        print(f"Epoch [{epoch+1}/{num_epochs}] Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%")
+        # Evaluate on validation set
+        val_loss, val_accuracy = evaluate_model(model, val_dataloader, criterion, device, sequence_length)
+        print(f"Epoch [{epoch+1}/{num_epochs}] Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_accuracy:.2f}%")
         
         # Learning rate scheduling
-        scheduler.step(test_accuracy)
+        scheduler.step(val_accuracy)
         
         # Save best model and check early stopping
-        if test_accuracy > best_test_accuracy:
-            best_test_accuracy = test_accuracy
+        if val_accuracy > best_val_accuracy:
+            best_val_accuracy = val_accuracy
             patience_counter = 0
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
-                'test_accuracy': test_accuracy,
+                'val_accuracy': val_accuracy,
                 'char_to_idx': char_to_idx,
                 'idx_to_char': idx_to_char
-            }, "C:\\Projects\\Major_ML\\Saved_Path\\best_char_rnn_model.pth")
-            print(f"Saved new best model with test accuracy: {test_accuracy:.2f}%")
+            }, "C:\\Projects\\Major_ML\\best_model.pth")
+            print("Model saved.")
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print(f"Early stopping triggered after {epoch + 1} epochs")
+                print("Early stopping.")
                 break
+    
+    # Evaluate on test set
+    test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device, sequence_length)
+    print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%")
 
 if __name__ == "__main__":
     main()
