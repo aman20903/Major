@@ -63,6 +63,8 @@ class ImprovedCharRNN(nn.Module):
         return (torch.zeros(self.num_layers * num_directions, batch_size, self.hidden_size).to(device),
                 torch.zeros(self.num_layers * num_directions, batch_size, self.hidden_size).to(device))
 
+# Rest of the code remains the same
+
 def load_codeforces_data(folder_path):
     code_data = ""
     chars = set()
@@ -86,9 +88,9 @@ def load_codeforces_data(folder_path):
 
     return encoded_data, char_to_idx, idx_to_char
 
-def create_sequences(encoded_data, sequence_length):
+def create_sequences(encoded_data, sequence_length,stride=None):
     sequences = []
-    stride = sequence_length // 2
+    stride = stride if stride else sequence_length  # Increased stride to reduce sequence overlap
     for i in range(0, len(encoded_data) - sequence_length, stride):
         seq = encoded_data[i:i + sequence_length]
         sequences.append(seq)
@@ -129,22 +131,24 @@ def evaluate_model(model, dataloader, criterion, device, sequence_length):
 def main():
     # Hyperparameters
     input_size = 128
-    hidden_size = 512  # Increased hidden size
-    num_layers = 3  # Increased number of layers
-    num_epochs = 10  # Increased number of epochs
-    learning_rate = 0.0005  # Reduced learning rate for finer adjustments
-    sequence_length = 100
-    batch_size = 32
+    hidden_size = 512
+    num_layers = 4
+    num_epochs = 6
+    learning_rate = 0.001
+    sequence_length = 100  # Reduced sequence length
+    batch_size = 24  # Increased batch size
     test_size = 0.2
-    dropout = 0.4  # Increased dropout to prevent overfitting
-    weight_decay = 1e-5  # Reduced weight decay
+    dropout = 0.2
+    weight_decay = 1e-3
+    stride = 50
 
     # Load and prepare data
     encoded_data, char_to_idx, idx_to_char = load_codeforces_data("C:\\Projects\\Major_ML\\New_Db")
     vocab_size = len(char_to_idx)
     
-    sequences = create_sequences(encoded_data, sequence_length)
+    sequences = create_sequences(encoded_data, sequence_length,stride=stride)  # Increased stride
     train_sequences, val_sequences, test_sequences, _ = train_test_split(sequences, sequences, test_size=test_size, random_state=42)
+    
     
     train_dataloader = create_dataloader(train_sequences, batch_size)
     val_dataloader = create_dataloader(val_sequences, batch_size, shuffle=False)
@@ -198,7 +202,7 @@ def main():
             total_correct += (predicted == targets).sum().item()
             total_predictions += targets.size(0)
             
-            if i % 100 == 0:
+            if i % 400 == 0:
                 avg_loss = total_loss / (i + 1)
                 accuracy = (total_correct / total_predictions) * 100
                 print(f"Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(train_dataloader)}], "
@@ -221,18 +225,18 @@ def main():
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_accuracy': val_accuracy,
                 'char_to_idx': char_to_idx,
-                'idx_to_char': idx_to_char
+                'idx_to_char': idx_to_char,
             }, "C:\\Projects\\Major_ML\\best_model.pth")
             print("Model saved.")
         else:
             patience_counter += 1
             if patience_counter >= patience:
-                print("Early stopping.")
+                print("Early stopping triggered.")
                 break
     
-    # Evaluate on test set
     test_loss, test_accuracy = evaluate_model(model, test_dataloader, criterion, device, sequence_length)
     print(f"Test Loss: {test_loss:.4f}, Test Accuracy: {test_accuracy:.2f}%")
+    return test_accuracy
 
 if __name__ == "__main__":
     main()
